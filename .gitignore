@@ -1,0 +1,4 @@
+node_modules/
+catalogue.db
+catalogue.db-wal
+catalogue.db-shm

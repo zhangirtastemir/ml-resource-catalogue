@@ -1,0 +1,135 @@
+================================================================
+   HOW TO RUN — ML Resource Catalogue (Web Application)
+================================================================
+
+Hello! This document will guide you step by step to run the
+web application on your Mac. No prior experience needed.
+
+You only need to do Steps 1-2 once. After that, you can
+always start from Step 3.
+
+
+================================================================
+STEP 1 — Install Node.js (one-time setup, ~5 minutes)
+================================================================
+
+1. Open your web browser (Safari, Chrome, etc.)
+2. Go to:  https://nodejs.org
+3. Click the big green button that says "LTS" (Long Term Support)
+   — this downloads an installer file (.pkg)
+4. Open the downloaded file (it will be in your Downloads folder)
+5. Follow the installer — just click "Continue" and "Agree"
+   through each screen, then click "Install"
+6. Enter your Mac password when asked, then click "Close"
+
+Done! Node.js is now installed on your Mac.
+
+
+================================================================
+STEP 2 — Set up the application (one-time setup, ~2 minutes)
+================================================================
+
+1. Unzip the archive you received (double-click the .zip file)
+   — this creates a folder called "Case Study 1"
+
+2. Open the Terminal application:
+   - Press Command + Space (this opens Spotlight Search)
+   - Type:  Terminal
+   - Press Enter
+   - A window with a black or white text screen will open
+
+3. In Terminal, type the following command and press Enter:
+
+   cd ~/Downloads/Case\ Study\ 1
+
+   NOTE: If you placed the folder somewhere else (like Desktop),
+   replace "Downloads" with that location name, for example:
+   cd ~/Desktop/Case\ Study\ 1
+
+4. Now type this command and press Enter:
+
+   npm install
+
+   Wait until it finishes (you will see text scrolling — this
+   is normal). It may take 1-2 minutes. When it is done, you
+   will see your cursor blinking on a new empty line.
+
+Setup is complete!
+
+
+================================================================
+STEP 3 — Start the application
+================================================================
+
+1. Open Terminal (Command + Space, type "Terminal", press Enter)
+
+2. Navigate to the project folder (same command as before):
+
+   cd ~/Downloads/Case\ Study\ 1
+
+3. Type this command and press Enter:
+
+   npm start
+
+4. You should see a message that says:
+
+   "ML Resource Catalogue running at http://localhost:3000"
+
+   This means the application is running!
+
+5. Open your web browser and go to:
+
+   http://localhost:3000
+
+   The application will appear in your browser. You can now
+   browse, search, add, edit, and delete ML resources.
+   You can also export resources as CSV or PDF files.
+
+
+================================================================
+STEP 4 — Stop the application (when you are done)
+================================================================
+
+1. Go back to the Terminal window
+2. Press Control + C (hold the Control key and press C)
+   — this stops the application
+3. You can close the Terminal window
+
+
+================================================================
+TROUBLESHOOTING
+================================================================
+
+Problem: "command not found: npm" or "command not found: node"
+Solution: Node.js was not installed correctly. Go back to
+          Step 1 and reinstall it. After installing, close
+          Terminal completely and reopen it.
+
+Problem: "No such file or directory"
+Solution: The folder path is wrong. Check where you placed
+          the unzipped folder. You can also drag the folder
+          into the Terminal window after typing "cd " (with
+          a space after cd) to auto-fill the correct path.
+
+Problem: "EADDRINUSE" or "port 3000 already in use"
+Solution: The application is already running in another
+          Terminal window. Close that window first (or press
+          Control + C in it), then try again.
+
+Problem: The browser shows "This site can't be reached"
+Solution: Make sure the Terminal still shows the "running at"
+          message. If not, run "npm start" again.
+
+
+================================================================
+QUICK REFERENCE (after initial setup)
+================================================================
+
+  To start:  Open Terminal, type these two commands:
+             cd ~/Downloads/Case\ Study\ 1
+             npm start
+             Then open http://localhost:3000 in your browser.
+
+  To stop:   Press Control + C in Terminal.
+
+================================================================
