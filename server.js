@@ -9,87 +9,308 @@ const PORT = process.env.PORT || 3000;
 // ---------------------------------------------------------------------------
 // Database setup
 // ---------------------------------------------------------------------------
-const db = new Database(path.join(__dirname, "catalogue.db"));
+const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, "catalogue.db");
+const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+// --- Lookup tables ---
 db.exec(`
-  CREATE TABLE IF NOT EXISTS resources (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    title         TEXT    NOT NULL,
-    description   TEXT    NOT NULL DEFAULT '',
-    category      TEXT    NOT NULL DEFAULT '',
-    activity      TEXT    NOT NULL DEFAULT '',
-    quality_attribute TEXT NOT NULL DEFAULT '',
-    tags          TEXT    NOT NULL DEFAULT '',
-    source_url    TEXT    NOT NULL DEFAULT '',
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  CREATE TABLE IF NOT EXISTS categories (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
   );
-`);
-
-// Migration: add source_url to existing databases that lack it
-const columns = db.prepare("PRAGMA table_info(resources)").all().map((c) => c.name);
-if (!columns.includes("source_url")) {
-  db.exec("ALTER TABLE resources ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
-}
-
-// Tags table — managed registry of tags
-db.exec(`
+  CREATE TABLE IF NOT EXISTS activities (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    group_name TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS qualities (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    group_name TEXT NOT NULL DEFAULT ''
+  );
   CREATE TABLE IF NOT EXISTS tags (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT    NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE
   );
 `);
 
-// Migration: seed tags table from existing resource tags (one-time)
-const tagCount = db.prepare("SELECT COUNT(*) AS cnt FROM tags").get().cnt;
-if (tagCount === 0) {
-  const tagRows = db.prepare("SELECT tags FROM resources WHERE tags != ''").all();
-  const tagSet = new Set();
-  tagRows.forEach((r) =>
-    r.tags.split(",").forEach((t) => {
-      const trimmed = t.trim();
-      if (trimmed) tagSet.add(trimmed);
-    })
+// --- Assets table (replaces resources) ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS assets (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL,
+    aka                TEXT NOT NULL DEFAULT '',
+    short_presentation TEXT NOT NULL DEFAULT '',
+    context            TEXT NOT NULL DEFAULT '',
+    why_and_how        TEXT NOT NULL DEFAULT '',
+    source_url         TEXT NOT NULL DEFAULT '',
+    visibility         TEXT NOT NULL DEFAULT 'CatalogueUser',
+    reference_title    TEXT NOT NULL DEFAULT '',
+    reference_url      TEXT NOT NULL DEFAULT '',
+    reference_note     TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  const insertTag = db.prepare("INSERT OR IGNORE INTO tags (name) VALUES (?)");
-  const seedTags = db.transaction((names) => {
-    for (const name of names) insertTag.run(name);
-  });
-  seedTags([...tagSet]);
+`);
+
+// Migrations: add columns to existing assets tables that lack them
+const assetCols = db.prepare("PRAGMA table_info(assets)").all().map(c => c.name);
+if (!assetCols.includes("why_and_how")) {
+  db.exec("ALTER TABLE assets ADD COLUMN why_and_how TEXT NOT NULL DEFAULT ''");
+}
+if (!assetCols.includes("visibility")) {
+  db.exec("ALTER TABLE assets ADD COLUMN visibility TEXT NOT NULL DEFAULT 'CatalogueUser'");
+}
+if (!assetCols.includes("reference_title")) {
+  db.exec("ALTER TABLE assets ADD COLUMN reference_title TEXT NOT NULL DEFAULT ''");
+}
+if (!assetCols.includes("reference_url")) {
+  db.exec("ALTER TABLE assets ADD COLUMN reference_url TEXT NOT NULL DEFAULT ''");
+}
+if (!assetCols.includes("reference_note")) {
+  db.exec("ALTER TABLE assets ADD COLUMN reference_note TEXT NOT NULL DEFAULT ''");
 }
 
-// Auto-seed: populate DB with demo data if resources table is empty
-// (needed for platforms like Render where filesystem resets on deploy)
-const resourceCount = db.prepare("SELECT COUNT(*) AS cnt FROM resources").get().cnt;
-if (resourceCount === 0) {
-  const seedData = require("./seed-data");
-  const insertRes = db.prepare(`
-    INSERT INTO resources (title, description, category, activity, quality_attribute, tags, source_url)
-    VALUES (@title, @description, @category, @activity, @quality_attribute, @tags, @source_url)
+// --- Knowledge block tables (multi-field per UML) ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS asset_solves (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id      INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text          TEXT NOT NULL DEFAULT '',
+    problem       TEXT NOT NULL DEFAULT '',
+    solution      TEXT NOT NULL DEFAULT '',
+    pros          TEXT NOT NULL DEFAULT '',
+    cons          TEXT NOT NULL DEFAULT '',
+    consequences  TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS asset_dos (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    what     TEXT NOT NULL DEFAULT '',
+    reason   TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS asset_donts (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    what     TEXT NOT NULL DEFAULT '',
+    reason   TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS asset_considers (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    what     TEXT NOT NULL DEFAULT '',
+    reason   TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS asset_be_awares (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    of_what  TEXT NOT NULL DEFAULT '',
+    reason   TEXT NOT NULL DEFAULT ''
+  );
+`);
+
+// Migration: add multi-field columns to existing KB tables
+function migrateKBColumns(table, newCols) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  for (const col of newCols) {
+    if (!cols.includes(col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+}
+migrateKBColumns("asset_solves", ["problem", "solution", "pros", "cons", "consequences"]);
+migrateKBColumns("asset_dos", ["what", "reason"]);
+migrateKBColumns("asset_donts", ["what", "reason"]);
+migrateKBColumns("asset_considers", ["what", "reason"]);
+migrateKBColumns("asset_be_awares", ["of_what", "reason"]);
+
+// Migrate legacy: copy text → primary field where primary field is empty
+db.exec(`UPDATE asset_solves SET problem = text WHERE problem = '' AND text != ''`);
+db.exec(`UPDATE asset_dos SET what = text WHERE what = '' AND text != ''`);
+db.exec(`UPDATE asset_donts SET what = text WHERE what = '' AND text != ''`);
+db.exec(`UPDATE asset_considers SET what = text WHERE what = '' AND text != ''`);
+db.exec(`UPDATE asset_be_awares SET of_what = text WHERE of_what = '' AND text != ''`);
+
+// --- Exemplifications ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS asset_exemplifications (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL
+  );
+`);
+
+// --- Junction tables (many-to-many) ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS asset_categories (
+    asset_id    INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, category_id)
+  );
+  CREATE TABLE IF NOT EXISTS asset_activities (
+    asset_id    INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, activity_id)
+  );
+  CREATE TABLE IF NOT EXISTS asset_qualities (
+    asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    quality_id INTEGER NOT NULL REFERENCES qualities(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, quality_id)
+  );
+  CREATE TABLE IF NOT EXISTS asset_tags (
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, tag_id)
+  );
+  CREATE TABLE IF NOT EXISTS asset_references (
+    asset_id    INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    related_id  INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, related_id),
+    CHECK (asset_id != related_id)
+  );
+`);
+
+// ---------------------------------------------------------------------------
+// Seed lookup data (one-time)
+// ---------------------------------------------------------------------------
+function seedLookups() {
+  const catCount = db.prepare("SELECT COUNT(*) AS cnt FROM categories").get().cnt;
+  if (catCount === 0) {
+    const ins = db.prepare("INSERT OR IGNORE INTO categories (name) VALUES (?)");
+    ins.run("Design Pattern");
+    ins.run("Architecture Pattern");
+  }
+
+  const actCount = db.prepare("SELECT COUNT(*) AS cnt FROM activities").get().cnt;
+  if (actCount === 0) {
+    const ins = db.prepare("INSERT OR IGNORE INTO activities (name, group_name) VALUES (?, ?)");
+    // Software Engineering
+    ins.run("Architecture", "Software Engineering");
+    ins.run("Coding", "Software Engineering");
+    ins.run("Deployment", "Software Engineering");
+    ins.run("Development process", "Software Engineering");
+    ins.run("Software design", "Software Engineering");
+    ins.run("Software testing", "Software Engineering");
+    // Data Engineering
+    ins.run("Data engineering", "Data Engineering");
+    // ML Engineering
+    ins.run("Model type selection", "ML Engineering");
+    ins.run("Feature engineering", "ML Engineering");
+    ins.run("Model building", "ML Engineering");
+    ins.run("Operation", "ML Engineering");
+    ins.run("Model training", "ML Engineering");
+    ins.run("Data labeling", "ML Engineering");
+    // Management
+    ins.run("Governance", "Management");
+    ins.run("Project management", "Management");
+  }
+
+  const qualCount = db.prepare("SELECT COUNT(*) AS cnt FROM qualities").get().cnt;
+  if (qualCount === 0) {
+    const ins = db.prepare("INSERT OR IGNORE INTO qualities (name, group_name) VALUES (?, ?)");
+    // Software Quality
+    ins.run("Privacy", "Software Quality");
+    ins.run("Scalability", "Software Quality");
+    ins.run("Performance", "Software Quality");
+    // ML Quality
+    ins.run("Explainability", "ML Quality");
+    ins.run("Interpretability", "ML Quality");
+    ins.run("Reproducibility", "ML Quality");
+    ins.run("Responsibility", "ML Quality");
+    // Data Quality
+    ins.run("Data quality", "Data Quality");
+  }
+}
+seedLookups();
+
+// ---------------------------------------------------------------------------
+// Migration: import old resources table into new schema
+// ---------------------------------------------------------------------------
+(function migrateOldResources() {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  if (!tables.includes("resources")) return;
+
+  const oldRows = db.prepare("SELECT * FROM resources").all();
+  if (oldRows.length === 0) {
+    db.exec("DROP TABLE IF EXISTS resources");
+    return;
+  }
+
+  // Check if migration already done
+  const assetCount = db.prepare("SELECT COUNT(*) AS cnt FROM assets").get().cnt;
+  if (assetCount > 0) {
+    db.exec("DROP TABLE IF EXISTS resources");
+    return;
+  }
+
+  const insertAsset = db.prepare(`
+    INSERT INTO assets (name, aka, short_presentation, context, source_url, created_at, updated_at)
+    VALUES (?, '', ?, '', ?, ?, ?)
   `);
-  const insertAll = db.transaction((items) => {
-    for (const item of items) insertRes.run(item);
-  });
-  insertAll(seedData);
 
-  // Also seed tags from the data
-  const seedTagSet = new Set();
-  seedData.forEach((r) =>
-    r.tags.split(",").forEach((t) => {
-      const trimmed = t.trim();
-      if (trimmed) seedTagSet.add(trimmed);
-    })
-  );
-  const insertTagAuto = db.prepare("INSERT OR IGNORE INTO tags (name) VALUES (?)");
-  const seedTagsTx = db.transaction((names) => {
-    for (const name of names) insertTagAuto.run(name);
-  });
-  seedTagsTx([...seedTagSet]);
+  const migrate = db.transaction(() => {
+    for (const r of oldRows) {
+      const info = insertAsset.run(
+        r.title,
+        r.description || "",
+        r.source_url || "",
+        r.created_at,
+        r.updated_at
+      );
+      const assetId = info.lastInsertRowid;
 
-  console.log(`Auto-seeded ${seedData.length} resources and ${seedTagSet.size} tags.`);
-}
+      // Map old category
+      if (r.category) {
+        const cat = db.prepare("SELECT id FROM categories WHERE name = ?").get(r.category);
+        if (cat) {
+          db.prepare("INSERT OR IGNORE INTO asset_categories (asset_id, category_id) VALUES (?, ?)").run(assetId, cat.id);
+        }
+      }
+
+      // Map old activity
+      if (r.activity) {
+        const act = db.prepare("SELECT id FROM activities WHERE name = ?").get(r.activity);
+        if (act) {
+          db.prepare("INSERT OR IGNORE INTO asset_activities (asset_id, activity_id) VALUES (?, ?)").run(assetId, act.id);
+        }
+      }
+
+      // Map old quality_attribute
+      if (r.quality_attribute) {
+        const qual = db.prepare("SELECT id FROM qualities WHERE name = ?").get(r.quality_attribute);
+        if (qual) {
+          db.prepare("INSERT OR IGNORE INTO asset_qualities (asset_id, quality_id) VALUES (?, ?)").run(assetId, qual.id);
+        }
+      }
+
+      // Map old tags
+      if (r.tags) {
+        const tagNames = r.tags.split(",").map(t => t.trim()).filter(Boolean);
+        for (const tn of tagNames) {
+          db.prepare("INSERT OR IGNORE INTO tags (name) VALUES (?)").run(tn);
+          const tag = db.prepare("SELECT id FROM tags WHERE name = ?").get(tn);
+          if (tag) {
+            db.prepare("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?, ?)").run(assetId, tag.id);
+          }
+        }
+      }
+
+      // Add description as first exemplification
+      if (r.description) {
+        db.prepare("INSERT INTO asset_exemplifications (asset_id, text) VALUES (?, ?)").run(assetId, r.description);
+      }
+    }
+  });
+
+  migrate();
+  db.exec("DROP TABLE IF EXISTS resources");
+})();
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -98,85 +319,423 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 // ---------------------------------------------------------------------------
-// API routes — Resources CRUD + search
+// Helpers: load full asset with relations
+// ---------------------------------------------------------------------------
+function loadAssetFull(assetId) {
+  const asset = db.prepare("SELECT * FROM assets WHERE id = ?").get(assetId);
+  if (!asset) return null;
+
+  asset.categories = db.prepare(`
+    SELECT c.id, c.name FROM categories c
+    JOIN asset_categories ac ON ac.category_id = c.id
+    WHERE ac.asset_id = ? ORDER BY c.name
+  `).all(assetId);
+
+  asset.activities = db.prepare(`
+    SELECT a.id, a.name, a.group_name FROM activities a
+    JOIN asset_activities aa ON aa.activity_id = a.id
+    WHERE aa.asset_id = ? ORDER BY a.group_name, a.name
+  `).all(assetId);
+
+  asset.qualities = db.prepare(`
+    SELECT q.id, q.name, q.group_name FROM qualities q
+    JOIN asset_qualities aq ON aq.quality_id = q.id
+    WHERE aq.asset_id = ? ORDER BY q.group_name, q.name
+  `).all(assetId);
+
+  asset.tags = db.prepare(`
+    SELECT t.id, t.name FROM tags t
+    JOIN asset_tags at2 ON at2.tag_id = t.id
+    WHERE at2.asset_id = ? ORDER BY t.name
+  `).all(assetId);
+
+  asset.solves = db.prepare("SELECT id, problem, solution, pros, cons, consequences FROM asset_solves WHERE asset_id = ?").all(assetId);
+  asset.dos = db.prepare("SELECT id, what, reason FROM asset_dos WHERE asset_id = ?").all(assetId);
+  asset.donts = db.prepare("SELECT id, what, reason FROM asset_donts WHERE asset_id = ?").all(assetId);
+  asset.considers = db.prepare("SELECT id, what, reason FROM asset_considers WHERE asset_id = ?").all(assetId);
+  asset.be_awares = db.prepare("SELECT id, of_what, reason FROM asset_be_awares WHERE asset_id = ?").all(assetId);
+
+  asset.exemplifications = db.prepare("SELECT id, text FROM asset_exemplifications WHERE asset_id = ?").all(assetId);
+
+  asset.related = db.prepare(`
+    SELECT a.id, a.name FROM assets a
+    JOIN asset_references ar ON ar.related_id = a.id
+    WHERE ar.asset_id = ?
+    UNION
+    SELECT a.id, a.name FROM assets a
+    JOIN asset_references ar ON ar.asset_id = a.id
+    WHERE ar.related_id = ?
+  `).all(assetId, assetId);
+
+  return asset;
+}
+
+// ---------------------------------------------------------------------------
+// API: Assets
 // ---------------------------------------------------------------------------
 
-// Shared helper: build filtered query from request query params
-function buildFilteredQuery(query) {
-  const { search, category, activity, quality_attribute, tag } = query;
+// LIST with filters + sorting
+app.get("/api/assets", (req, res) => {
+  const { search, category, activity, quality, tag, sort, include_internal } = req.query;
 
-  let sql = "SELECT * FROM resources WHERE 1=1";
+  let sql = "SELECT DISTINCT a.* FROM assets a";
+  const joins = [];
+  const wheres = [];
   const params = [];
 
-  if (search) {
-    sql += " AND (title LIKE ? OR description LIKE ? OR source_url LIKE ?)";
-    const term = `%${search}%`;
-    params.push(term, term, term);
-  }
   if (category) {
-    sql += " AND category = ?";
+    joins.push("JOIN asset_categories ac ON ac.asset_id = a.id JOIN categories c ON c.id = ac.category_id");
+    wheres.push("c.name = ?");
     params.push(category);
   }
   if (activity) {
-    sql += " AND activity = ?";
+    joins.push("JOIN asset_activities aa ON aa.asset_id = a.id JOIN activities act ON act.id = aa.activity_id");
+    wheres.push("act.name = ?");
     params.push(activity);
   }
-  if (quality_attribute) {
-    sql += " AND quality_attribute = ?";
-    params.push(quality_attribute);
+  if (quality) {
+    joins.push("JOIN asset_qualities aq ON aq.asset_id = a.id JOIN qualities q ON q.id = aq.quality_id");
+    wheres.push("q.name = ?");
+    params.push(quality);
   }
   if (tag) {
-    sql += " AND (',' || tags || ',' LIKE ?)";
-    params.push(`%,${tag},%`);
+    joins.push("JOIN asset_tags at2 ON at2.asset_id = a.id JOIN tags t ON t.id = at2.tag_id");
+    wheres.push("t.name = ?");
+    params.push(tag);
+  }
+  if (search) {
+    wheres.push("(a.name LIKE ? OR a.short_presentation LIKE ? OR a.context LIKE ? OR a.why_and_how LIKE ? OR a.source_url LIKE ? OR a.reference_title LIKE ? OR a.reference_url LIKE ? OR a.reference_note LIKE ?)");
+    const term = `%${search}%`;
+    params.push(term, term, term, term, term, term, term, term);
+  }
+  if (include_internal !== "1") {
+    wheres.push("a.visibility = 'CatalogueUser'");
   }
 
-  sql += " ORDER BY updated_at DESC";
-  return db.prepare(sql).all(...params);
-}
+  sql += " " + joins.join(" ");
+  if (wheres.length) sql += " WHERE " + wheres.join(" AND ");
 
-// LIST  — GET /api/resources?search=&category=&activity=&quality_attribute=&tag=
-app.get("/api/resources", (req, res) => {
-  res.json(buildFilteredQuery(req.query));
+  // Sorting
+  switch (sort) {
+    case "category":
+      if (!category) {
+        sql = sql.replace("SELECT DISTINCT a.*", "SELECT DISTINCT a.*, COALESCE(csort.name,'') AS _csort");
+        sql += " LEFT JOIN asset_categories acsort ON acsort.asset_id = a.id LEFT JOIN categories csort ON csort.id = acsort.category_id";
+      }
+      sql += " ORDER BY " + (category ? "c.name" : "_csort") + ", a.name";
+      break;
+    case "activity_group":
+      if (!activity) {
+        sql = sql.replace("SELECT DISTINCT a.*", "SELECT DISTINCT a.*, COALESCE(asort.group_name,'') AS _agsort");
+        sql += " LEFT JOIN asset_activities aasort ON aasort.asset_id = a.id LEFT JOIN activities asort ON asort.id = aasort.activity_id";
+      }
+      sql += " ORDER BY " + (activity ? "act.group_name" : "_agsort") + ", a.name";
+      break;
+    case "quality_group":
+      if (!quality) {
+        sql = sql.replace("SELECT DISTINCT a.*", "SELECT DISTINCT a.*, COALESCE(qsort.group_name,'') AS _qgsort");
+        sql += " LEFT JOIN asset_qualities aqsort ON aqsort.asset_id = a.id LEFT JOIN qualities qsort ON qsort.id = aqsort.quality_id";
+      }
+      sql += " ORDER BY " + (quality ? "q.group_name" : "_qgsort") + ", a.name";
+      break;
+    case "name":
+      sql += " ORDER BY a.name";
+      break;
+    default:
+      sql += " ORDER BY a.updated_at DESC";
+  }
+
+  const rows = db.prepare(sql).all(...params);
+
+  // Enrich each row with relations
+  const assets = rows.map(r => {
+    const full = loadAssetFull(r.id);
+    return full;
+  });
+
+  res.json(assets);
 });
 
-// DISTINCT filter values — GET /api/resources/filters
-app.get("/api/resources/filters", (_req, res) => {
-  const categories = db
-    .prepare("SELECT DISTINCT category FROM resources WHERE category != '' ORDER BY category")
-    .all()
-    .map((r) => r.category);
-  const activities = db
-    .prepare("SELECT DISTINCT activity FROM resources WHERE activity != '' ORDER BY activity")
-    .all()
-    .map((r) => r.activity);
-  const qualityAttributes = db
-    .prepare("SELECT DISTINCT quality_attribute FROM resources WHERE quality_attribute != '' ORDER BY quality_attribute")
-    .all()
-    .map((r) => r.quality_attribute);
+// FILTERS
+app.get("/api/assets/filters", (_req, res) => {
+  const categories = db.prepare("SELECT id, name FROM categories ORDER BY name").all();
+  const activities = db.prepare("SELECT id, name, group_name FROM activities ORDER BY group_name, name").all();
+  const qualities = db.prepare("SELECT id, name, group_name FROM qualities ORDER BY group_name, name").all();
+  const tags = db.prepare("SELECT id, name FROM tags ORDER BY name").all();
 
-  // Tags sourced from the managed tags table
-  const tags = db
-    .prepare("SELECT name FROM tags ORDER BY name")
-    .all()
-    .map((r) => r.name);
+  res.json({ categories, activities, qualities, tags });
+});
 
-  res.json({
-    categories,
-    activities,
-    qualityAttributes,
-    tags,
+// GET single
+app.get("/api/assets/:id", (req, res) => {
+  const asset = loadAssetFull(req.params.id);
+  if (!asset) return res.status(404).json({ error: "Asset not found" });
+  res.json(asset);
+});
+
+// Helper: sync many-to-many
+function syncRelation(assetId, table, assetCol, refCol, ids) {
+  db.prepare(`DELETE FROM ${table} WHERE ${assetCol} = ?`).run(assetId);
+  const ins = db.prepare(`INSERT OR IGNORE INTO ${table} (${assetCol}, ${refCol}) VALUES (?, ?)`);
+  for (const id of ids) ins.run(assetId, id);
+}
+
+// Helper: sync knowledge blocks (multi-field)
+function syncKnowledgeBlock(assetId, table, items) {
+  db.prepare(`DELETE FROM ${table} WHERE asset_id = ?`).run(assetId);
+  const ins = db.prepare(`INSERT INTO ${table} (asset_id, text) VALUES (?, ?)`);
+  for (const item of items) {
+    if (typeof item === "string") {
+      if (item.trim()) ins.run(assetId, item.trim());
+    }
+  }
+}
+
+function syncSolves(assetId, items) {
+  db.prepare("DELETE FROM asset_solves WHERE asset_id = ?").run(assetId);
+  const ins = db.prepare("INSERT INTO asset_solves (asset_id, problem, solution, pros, cons, consequences) VALUES (?, ?, ?, ?, ?, ?)");
+  for (const it of items) {
+    if (it.problem || it.solution || it.pros || it.cons || it.consequences) {
+      ins.run(assetId, (it.problem || "").trim(), (it.solution || "").trim(), (it.pros || "").trim(), (it.cons || "").trim(), (it.consequences || "").trim());
+    }
+  }
+}
+
+function syncWhatReason(assetId, table, items) {
+  db.prepare(`DELETE FROM ${table} WHERE asset_id = ?`).run(assetId);
+  const col = table === "asset_be_awares" ? "of_what" : "what";
+  const ins = db.prepare(`INSERT INTO ${table} (asset_id, ${col}, reason) VALUES (?, ?, ?)`);
+  for (const it of items) {
+    const primary = table === "asset_be_awares" ? it.of_what : it.what;
+    if (primary || it.reason) {
+      ins.run(assetId, (primary || "").trim(), (it.reason || "").trim());
+    }
+  }
+}
+
+// CREATE
+app.post("/api/assets", (req, res) => {
+  const b = req.body;
+  if (!b.name || !b.name.trim()) {
+    return res.status(400).json({ error: "Name is required" });
+  }
+  const exemplifications = (b.exemplifications || []).filter(t => t && t.trim());
+  if (exemplifications.length === 0) {
+    return res.status(400).json({ error: "At least one exemplification is required." });
+  }
+
+  const visibility = (b.visibility === "InternalOnly") ? "InternalOnly" : "CatalogueUser";
+
+  const save = db.transaction(() => {
+    const info = db.prepare(`
+      INSERT INTO assets (name, aka, short_presentation, context, why_and_how, source_url, visibility, reference_title, reference_url, reference_note)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      b.name.trim(),
+      (b.aka || "").trim(),
+      (b.short_presentation || "").trim(),
+      (b.context || "").trim(),
+      (b.why_and_how || "").trim(),
+      (b.source_url || "").trim(),
+      visibility,
+      (b.reference_title || "").trim(),
+      (b.reference_url || "").trim(),
+      (b.reference_note || "").trim()
+    );
+    const id = info.lastInsertRowid;
+
+    syncRelation(id, "asset_categories", "asset_id", "category_id", b.category_ids || []);
+    syncRelation(id, "asset_activities", "asset_id", "activity_id", b.activity_ids || []);
+    syncRelation(id, "asset_qualities", "asset_id", "quality_id", b.quality_ids || []);
+    syncRelation(id, "asset_tags", "asset_id", "tag_id", b.tag_ids || []);
+    syncRelation(id, "asset_references", "asset_id", "related_id", b.related_ids || []);
+
+    syncSolves(id, b.solves || []);
+    syncWhatReason(id, "asset_dos", b.dos || []);
+    syncWhatReason(id, "asset_donts", b.donts || []);
+    syncWhatReason(id, "asset_considers", b.considers || []);
+    syncWhatReason(id, "asset_be_awares", b.be_awares || []);
+    syncKnowledgeBlock(id, "asset_exemplifications", b.exemplifications || []);
+
+    return id;
   });
+
+  const id = save();
+  res.status(201).json(loadAssetFull(id));
+});
+
+// UPDATE
+app.put("/api/assets/:id", (req, res) => {
+  const existing = db.prepare("SELECT * FROM assets WHERE id = ?").get(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Asset not found" });
+
+  const b = req.body;
+  if (!b.name || !b.name.trim()) {
+    return res.status(400).json({ error: "Name is required" });
+  }
+  if (b.exemplifications !== undefined) {
+    const exemplifications = (b.exemplifications || []).filter(t => t && t.trim());
+    if (exemplifications.length === 0) {
+      return res.status(400).json({ error: "At least one exemplification is required." });
+    }
+  }
+
+  const visibility = (b.visibility === "InternalOnly") ? "InternalOnly" : "CatalogueUser";
+
+  const save = db.transaction(() => {
+    db.prepare(`
+      UPDATE assets SET name = ?, aka = ?, short_presentation = ?, context = ?, why_and_how = ?, source_url = ?,
+        visibility = ?, reference_title = ?, reference_url = ?, reference_note = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      b.name.trim(),
+      (b.aka || "").trim(),
+      (b.short_presentation || "").trim(),
+      (b.context || "").trim(),
+      (b.why_and_how || "").trim(),
+      (b.source_url || "").trim(),
+      visibility,
+      (b.reference_title || "").trim(),
+      (b.reference_url || "").trim(),
+      (b.reference_note || "").trim(),
+      req.params.id
+    );
+
+    const id = Number(req.params.id);
+    if (b.category_ids !== undefined) syncRelation(id, "asset_categories", "asset_id", "category_id", b.category_ids);
+    if (b.activity_ids !== undefined) syncRelation(id, "asset_activities", "asset_id", "activity_id", b.activity_ids);
+    if (b.quality_ids !== undefined)  syncRelation(id, "asset_qualities", "asset_id", "quality_id", b.quality_ids);
+    if (b.tag_ids !== undefined)      syncRelation(id, "asset_tags", "asset_id", "tag_id", b.tag_ids);
+
+    // Related: clear both directions, re-insert — only if key provided
+    if (b.related_ids !== undefined) {
+      db.prepare("DELETE FROM asset_references WHERE asset_id = ? OR related_id = ?").run(id, id);
+      const insRef = db.prepare("INSERT OR IGNORE INTO asset_references (asset_id, related_id) VALUES (?, ?)");
+      for (const rid of b.related_ids) {
+        if (rid !== id) insRef.run(id, rid);
+      }
+    }
+
+    if (b.solves !== undefined)           syncSolves(id, b.solves);
+    if (b.dos !== undefined)              syncWhatReason(id, "asset_dos", b.dos);
+    if (b.donts !== undefined)            syncWhatReason(id, "asset_donts", b.donts);
+    if (b.considers !== undefined)        syncWhatReason(id, "asset_considers", b.considers);
+    if (b.be_awares !== undefined)        syncWhatReason(id, "asset_be_awares", b.be_awares);
+    if (b.exemplifications !== undefined) syncKnowledgeBlock(id, "asset_exemplifications", b.exemplifications);
+  });
+
+  save();
+  res.json(loadAssetFull(req.params.id));
+});
+
+// DELETE
+app.delete("/api/assets/:id", (req, res) => {
+  const existing = db.prepare("SELECT * FROM assets WHERE id = ?").get(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Asset not found" });
+  db.prepare("DELETE FROM assets WHERE id = ?").run(req.params.id);
+  res.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// API: Tags CRUD
+// ---------------------------------------------------------------------------
+app.get("/api/tags", (_req, res) => {
+  res.json(db.prepare("SELECT * FROM tags ORDER BY name").all());
+});
+
+app.post("/api/tags", (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "Tag name is required" });
+  const trimmed = name.trim();
+  const existing = db.prepare("SELECT * FROM tags WHERE name = ?").get(trimmed);
+  if (existing) return res.status(409).json({ error: "Tag already exists" });
+  const info = db.prepare("INSERT INTO tags (name) VALUES (?)").run(trimmed);
+  res.status(201).json(db.prepare("SELECT * FROM tags WHERE id = ?").get(info.lastInsertRowid));
+});
+
+app.put("/api/tags/:id", (req, res) => {
+  const tag = db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id);
+  if (!tag) return res.status(404).json({ error: "Tag not found" });
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "Tag name is required" });
+  const newName = name.trim();
+  if (newName !== tag.name) {
+    const conflict = db.prepare("SELECT * FROM tags WHERE name = ? AND id != ?").get(newName, req.params.id);
+    if (conflict) return res.status(409).json({ error: "A tag with that name already exists" });
+    db.prepare("UPDATE tags SET name = ? WHERE id = ?").run(newName, req.params.id);
+  }
+  res.json(db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id));
+});
+
+app.delete("/api/tags/:id", (req, res) => {
+  const tag = db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id);
+  if (!tag) return res.status(404).json({ error: "Tag not found" });
+  db.prepare("DELETE FROM asset_tags WHERE tag_id = ?").run(req.params.id);
+  db.prepare("DELETE FROM tags WHERE id = ?").run(req.params.id);
+  res.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// API: All assets (minimal, for related-asset picker)
+// ---------------------------------------------------------------------------
+app.get("/api/assets-list", (_req, res) => {
+  res.json(db.prepare("SELECT id, name FROM assets ORDER BY name").all());
 });
 
 // ---------------------------------------------------------------------------
 // Export — CSV
 // ---------------------------------------------------------------------------
-app.get("/api/resources/export/csv", (req, res) => {
-  const rows = buildFilteredQuery(req.query);
+app.get("/api/assets/export/csv", (req, res) => {
+  const { search, category, activity, quality, tag, sort, include_internal } = req.query;
+
+  // Build same query as list endpoint
+  let sql = "SELECT DISTINCT a.* FROM assets a";
+  const joins = [];
+  const wheres = [];
+  const params = [];
+
+  if (category) {
+    joins.push("JOIN asset_categories ac ON ac.asset_id = a.id JOIN categories c ON c.id = ac.category_id");
+    wheres.push("c.name = ?");
+    params.push(category);
+  }
+  if (activity) {
+    joins.push("JOIN asset_activities aa ON aa.asset_id = a.id JOIN activities act ON act.id = aa.activity_id");
+    wheres.push("act.name = ?");
+    params.push(activity);
+  }
+  if (quality) {
+    joins.push("JOIN asset_qualities aq ON aq.asset_id = a.id JOIN qualities q ON q.id = aq.quality_id");
+    wheres.push("q.name = ?");
+    params.push(quality);
+  }
+  if (tag) {
+    joins.push("JOIN asset_tags at2 ON at2.asset_id = a.id JOIN tags t ON t.id = at2.tag_id");
+    wheres.push("t.name = ?");
+    params.push(tag);
+  }
+  if (search) {
+    wheres.push("(a.name LIKE ? OR a.short_presentation LIKE ? OR a.context LIKE ? OR a.why_and_how LIKE ? OR a.reference_title LIKE ? OR a.reference_url LIKE ? OR a.reference_note LIKE ?)");
+    const term = `%${search}%`;
+    params.push(term, term, term, term, term, term, term);
+  }
+  if (include_internal !== "1") {
+    wheres.push("a.visibility = 'CatalogueUser'");
+  }
+
+  sql += " " + joins.join(" ");
+  if (wheres.length) sql += " WHERE " + wheres.join(" AND ");
+  sql += " ORDER BY a.name";
+
+  const rows = db.prepare(sql).all(...params);
+  const assets = rows.map(r => loadAssetFull(r.id));
 
   const headers = [
-    "ID", "Title", "Description", "Category", "Activity",
-    "Quality Attribute", "Tags", "Source URL", "Created At", "Updated At",
+    "ID", "Name", "AKA", "Short Presentation", "Context", "Why and How",
+    "Visibility", "Reference Title", "Reference URL", "Reference Note",
+    "Categories", "Activities", "Qualities", "Tags",
+    "Solves", "Do", "Don't", "Consider", "Be Aware",
+    "Exemplifications", "Related Assets", "Source URL", "Created At", "Updated At",
   ];
 
   function csvCell(val) {
@@ -188,60 +747,104 @@ app.get("/api/resources/export/csv", (req, res) => {
   }
 
   const lines = [headers.map(csvCell).join(",")];
-  for (const r of rows) {
+  for (const a of assets) {
     lines.push([
-      r.id, r.title, r.description, r.category, r.activity,
-      r.quality_attribute, r.tags, r.source_url, r.created_at, r.updated_at,
+      a.id, a.name, a.aka, a.short_presentation, a.context, a.why_and_how,
+      a.visibility, a.reference_title, a.reference_url, a.reference_note,
+      a.categories.map(c => c.name).join("; "),
+      a.activities.map(act => `${act.group_name}: ${act.name}`).join("; "),
+      a.qualities.map(q => `${q.group_name}: ${q.name}`).join("; "),
+      a.tags.map(t => t.name).join("; "),
+      a.solves.map(s => [s.problem, s.solution, s.pros, s.cons, s.consequences].filter(Boolean).join(" | ")).join("; "),
+      a.dos.map(d => [d.what, d.reason].filter(Boolean).join(" | ")).join("; "),
+      a.donts.map(d => [d.what, d.reason].filter(Boolean).join(" | ")).join("; "),
+      a.considers.map(c => [c.what, c.reason].filter(Boolean).join(" | ")).join("; "),
+      a.be_awares.map(b => [b.of_what, b.reason].filter(Boolean).join(" | ")).join("; "),
+      a.exemplifications.map(e => e.text).join("; "),
+      a.related.map(r => r.name).join("; "),
+      a.source_url, a.created_at, a.updated_at,
     ].map(csvCell).join(","));
   }
 
-  const csv = lines.join("\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", "attachment; filename=ml-resources.csv");
-  res.send(csv);
+  res.setHeader("Content-Disposition", "attachment; filename=ml-assets.csv");
+  res.send(lines.join("\n"));
 });
 
 // ---------------------------------------------------------------------------
 // Export — PDF
 // ---------------------------------------------------------------------------
-app.get("/api/resources/export/pdf", (req, res) => {
-  const rows = buildFilteredQuery(req.query);
+app.get("/api/assets/export/pdf", (req, res) => {
+  const { search, category, activity, quality, tag, include_internal } = req.query;
+
+  let sql = "SELECT DISTINCT a.* FROM assets a";
+  const joins = [];
+  const wheres = [];
+  const params = [];
+
+  if (category) {
+    joins.push("JOIN asset_categories ac ON ac.asset_id = a.id JOIN categories c ON c.id = ac.category_id");
+    wheres.push("c.name = ?");
+    params.push(category);
+  }
+  if (activity) {
+    joins.push("JOIN asset_activities aa ON aa.asset_id = a.id JOIN activities act ON act.id = aa.activity_id");
+    wheres.push("act.name = ?");
+    params.push(activity);
+  }
+  if (quality) {
+    joins.push("JOIN asset_qualities aq ON aq.asset_id = a.id JOIN qualities q ON q.id = aq.quality_id");
+    wheres.push("q.name = ?");
+    params.push(quality);
+  }
+  if (tag) {
+    joins.push("JOIN asset_tags at2 ON at2.asset_id = a.id JOIN tags t ON t.id = at2.tag_id");
+    wheres.push("t.name = ?");
+    params.push(tag);
+  }
+  if (search) {
+    wheres.push("(a.name LIKE ? OR a.short_presentation LIKE ? OR a.context LIKE ? OR a.why_and_how LIKE ? OR a.reference_title LIKE ? OR a.reference_url LIKE ? OR a.reference_note LIKE ?)");
+    const term = `%${search}%`;
+    params.push(term, term, term, term, term, term, term);
+  }
+  if (include_internal !== "1") {
+    wheres.push("a.visibility = 'CatalogueUser'");
+  }
+
+  sql += " " + joins.join(" ");
+  if (wheres.length) sql += " WHERE " + wheres.join(" AND ");
+  sql += " ORDER BY a.name";
+
+  const rows = db.prepare(sql).all(...params);
+  const assets = rows.map(r => loadAssetFull(r.id));
 
   const doc = new PDFDocument({ size: "A4", margin: 50 });
-
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", "attachment; filename=ml-resources.pdf");
+  res.setHeader("Content-Disposition", "attachment; filename=ml-assets.pdf");
   doc.pipe(res);
 
-  // Title
-  doc.fontSize(20).font("Helvetica-Bold").text("ML Resource Catalogue", { align: "center" });
+  doc.fontSize(20).font("Helvetica-Bold").text("ML Asset Catalogue", { align: "center" });
   doc.moveDown(0.3);
   doc.fontSize(10).font("Helvetica").fillColor("#666666")
-    .text(`${rows.length} resource${rows.length !== 1 ? "s" : ""} exported on ${new Date().toLocaleDateString()}`, { align: "center" });
+    .text(`${assets.length} asset${assets.length !== 1 ? "s" : ""} exported on ${new Date().toLocaleDateString()}`, { align: "center" });
   doc.moveDown(1);
 
-  // Active filters summary
   const filters = [];
-  if (req.query.search) filters.push(`Search: "${req.query.search}"`);
-  if (req.query.category) filters.push(`Category: ${req.query.category}`);
-  if (req.query.activity) filters.push(`Activity: ${req.query.activity}`);
-  if (req.query.quality_attribute) filters.push(`Quality Attribute: ${req.query.quality_attribute}`);
-  if (req.query.tag) filters.push(`Tag: ${req.query.tag}`);
+  if (search) filters.push(`Search: "${search}"`);
+  if (category) filters.push(`Category: ${category}`);
+  if (activity) filters.push(`Activity: ${activity}`);
+  if (quality) filters.push(`Quality: ${quality}`);
+  if (tag) filters.push(`Tag: ${tag}`);
   if (filters.length > 0) {
     doc.fontSize(9).fillColor("#888888").text("Active filters: " + filters.join(" | "));
     doc.moveDown(0.8);
   }
 
-  // Resources
   const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  rows.forEach((r, idx) => {
-    // Check space — start new page if less than 150pt remaining
-    if (doc.y > doc.page.height - doc.page.margins.bottom - 150) {
-      doc.addPage();
-    }
+  assets.forEach((a, idx) => {
+    if (doc.y > doc.page.height - doc.page.margins.bottom - 150) doc.addPage();
 
-    // Separator line between resources (not before the first)
     if (idx > 0) {
       doc.moveTo(doc.page.margins.left, doc.y)
         .lineTo(doc.page.margins.left + pageWidth, doc.y)
@@ -249,197 +852,51 @@ app.get("/api/resources/export/pdf", (req, res) => {
       doc.moveDown(0.6);
     }
 
-    // Title
-    doc.fontSize(13).font("Helvetica-Bold").fillColor("#0f3460").text(r.title);
+    doc.fontSize(13).font("Helvetica-Bold").fillColor("#0f3460").text(a.name);
     doc.moveDown(0.2);
 
-    // Field helper
     function field(label, value) {
       if (!value) return;
       doc.fontSize(8).font("Helvetica-Bold").fillColor("#64748b").text(label.toUpperCase(), { continued: true });
       doc.font("Helvetica").fillColor("#1e293b").text("  " + value);
     }
 
-    if (r.description) {
-      doc.fontSize(9).font("Helvetica").fillColor("#333333").text(r.description);
+    if (a.aka) field("AKA", a.aka);
+    if (a.short_presentation) {
+      doc.fontSize(9).font("Helvetica").fillColor("#333333").text(a.short_presentation);
       doc.moveDown(0.3);
     }
-
-    field("Category", r.category);
-    field("Activity", r.activity);
-    field("Quality Attribute", r.quality_attribute);
-    field("Tags", r.tags);
-    field("Source URL", r.source_url);
+    if (a.context) field("Context", a.context);
+    if (a.why_and_how) field("Why and How", a.why_and_how);
+    field("Categories", a.categories.map(c => c.name).join(", "));
+    field("Activities", a.activities.map(act => `${act.group_name}: ${act.name}`).join(", "));
+    field("Qualities", a.qualities.map(q => `${q.group_name}: ${q.name}`).join(", "));
+    field("Tags", a.tags.map(t => t.name).join(", "));
+    if (a.solves.length) field("Solves", a.solves.map(s => [s.problem, s.solution, s.pros, s.cons, s.consequences].filter(Boolean).join(" | ")).join("; "));
+    if (a.dos.length) field("Do", a.dos.map(d => [d.what, d.reason].filter(Boolean).join(" | ")).join("; "));
+    if (a.donts.length) field("Don't", a.donts.map(d => [d.what, d.reason].filter(Boolean).join(" | ")).join("; "));
+    if (a.considers.length) field("Consider", a.considers.map(c => [c.what, c.reason].filter(Boolean).join(" | ")).join("; "));
+    if (a.be_awares.length) field("Be Aware", a.be_awares.map(b => [b.of_what, b.reason].filter(Boolean).join(" | ")).join("; "));
+    if (a.exemplifications.length) field("Exemplifications", a.exemplifications.map(e => e.text).join("; "));
+    if (a.related.length) field("Related Assets", a.related.map(r => r.name).join(", "));
+    field("Source URL", a.source_url);
+    if (a.visibility === "InternalOnly") field("Visibility", "Internal Only");
+    if (a.reference_title || a.reference_url || a.reference_note) {
+      field("Reference", [a.reference_title, a.reference_url, a.reference_note].filter(Boolean).join(" — "));
+    }
 
     doc.moveDown(0.7);
   });
 
-  if (rows.length === 0) {
-    doc.fontSize(12).font("Helvetica").fillColor("#999999").text("No resources match the current filters.", { align: "center" });
+  if (assets.length === 0) {
+    doc.fontSize(12).font("Helvetica").fillColor("#999999").text("No assets match the current filters.", { align: "center" });
   }
 
   doc.end();
 });
 
-// GET single — GET /api/resources/:id
-app.get("/api/resources/:id", (req, res) => {
-  const row = db.prepare("SELECT * FROM resources WHERE id = ?").get(req.params.id);
-  if (!row) return res.status(404).json({ error: "Resource not found" });
-  res.json(row);
-});
-
-// CREATE — POST /api/resources
-app.post("/api/resources", (req, res) => {
-  const { title, description, category, activity, quality_attribute, tags, source_url } = req.body;
-  if (!title || !title.trim()) {
-    return res.status(400).json({ error: "Title is required" });
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO resources (title, description, category, activity, quality_attribute, tags, source_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const info = stmt.run(
-    title.trim(),
-    (description || "").trim(),
-    (category || "").trim(),
-    (activity || "").trim(),
-    (quality_attribute || "").trim(),
-    (tags || "").trim(),
-    (source_url || "").trim()
-  );
-
-  const created = db.prepare("SELECT * FROM resources WHERE id = ?").get(info.lastInsertRowid);
-  res.status(201).json(created);
-});
-
-// UPDATE — PUT /api/resources/:id
-app.put("/api/resources/:id", (req, res) => {
-  const existing = db.prepare("SELECT * FROM resources WHERE id = ?").get(req.params.id);
-  if (!existing) return res.status(404).json({ error: "Resource not found" });
-
-  const { title, description, category, activity, quality_attribute, tags, source_url } = req.body;
-  if (!title || !title.trim()) {
-    return res.status(400).json({ error: "Title is required" });
-  }
-
-  db.prepare(`
-    UPDATE resources
-    SET title = ?, description = ?, category = ?, activity = ?, quality_attribute = ?, tags = ?, source_url = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(
-    title.trim(),
-    (description || "").trim(),
-    (category || "").trim(),
-    (activity || "").trim(),
-    (quality_attribute || "").trim(),
-    (tags || "").trim(),
-    (source_url || "").trim(),
-    req.params.id
-  );
-
-  const updated = db.prepare("SELECT * FROM resources WHERE id = ?").get(req.params.id);
-  res.json(updated);
-});
-
-// DELETE — DELETE /api/resources/:id
-app.delete("/api/resources/:id", (req, res) => {
-  const existing = db.prepare("SELECT * FROM resources WHERE id = ?").get(req.params.id);
-  if (!existing) return res.status(404).json({ error: "Resource not found" });
-
-  db.prepare("DELETE FROM resources WHERE id = ?").run(req.params.id);
-  res.json({ success: true });
-});
-
 // ---------------------------------------------------------------------------
-// API routes — Tags management
-// ---------------------------------------------------------------------------
-
-// LIST — GET /api/tags
-app.get("/api/tags", (_req, res) => {
-  const rows = db.prepare("SELECT * FROM tags ORDER BY name").all();
-  res.json(rows);
-});
-
-// CREATE — POST /api/tags
-app.post("/api/tags", (req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: "Tag name is required" });
-  }
-  const trimmed = name.trim();
-
-  const existing = db.prepare("SELECT * FROM tags WHERE name = ?").get(trimmed);
-  if (existing) {
-    return res.status(409).json({ error: "Tag already exists" });
-  }
-
-  const info = db.prepare("INSERT INTO tags (name) VALUES (?)").run(trimmed);
-  const created = db.prepare("SELECT * FROM tags WHERE id = ?").get(info.lastInsertRowid);
-  res.status(201).json(created);
-});
-
-// RENAME — PUT /api/tags/:id
-app.put("/api/tags/:id", (req, res) => {
-  const tag = db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id);
-  if (!tag) return res.status(404).json({ error: "Tag not found" });
-
-  const { name } = req.body;
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: "Tag name is required" });
-  }
-  const newName = name.trim();
-  const oldName = tag.name;
-
-  if (newName !== oldName) {
-    const conflict = db.prepare("SELECT * FROM tags WHERE name = ? AND id != ?").get(newName, req.params.id);
-    if (conflict) {
-      return res.status(409).json({ error: "A tag with that name already exists" });
-    }
-
-    // Update tag registry
-    db.prepare("UPDATE tags SET name = ? WHERE id = ?").run(newName, req.params.id);
-
-    // Update all resources that reference the old tag name
-    const resources = db.prepare("SELECT id, tags FROM resources WHERE ',' || tags || ',' LIKE ?").all(`%,${oldName},%`);
-    const updateStmt = db.prepare("UPDATE resources SET tags = ?, updated_at = datetime('now') WHERE id = ?");
-    for (const r of resources) {
-      const updated = r.tags
-        .split(",")
-        .map((t) => (t.trim() === oldName ? newName : t.trim()))
-        .filter(Boolean)
-        .join(",");
-      updateStmt.run(updated, r.id);
-    }
-  }
-
-  const updated = db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id);
-  res.json(updated);
-});
-
-// DELETE — DELETE /api/tags/:id
-app.delete("/api/tags/:id", (req, res) => {
-  const tag = db.prepare("SELECT * FROM tags WHERE id = ?").get(req.params.id);
-  if (!tag) return res.status(404).json({ error: "Tag not found" });
-
-  // Remove this tag from all resources
-  const resources = db.prepare("SELECT id, tags FROM resources WHERE ',' || tags || ',' LIKE ?").all(`%,${tag.name},%`);
-  const updateStmt = db.prepare("UPDATE resources SET tags = ?, updated_at = datetime('now') WHERE id = ?");
-  for (const r of resources) {
-    const updated = r.tags
-      .split(",")
-      .map((t) => t.trim())
-      .filter((t) => t && t !== tag.name)
-      .join(",");
-    updateStmt.run(updated, r.id);
-  }
-
-  db.prepare("DELETE FROM tags WHERE id = ?").run(req.params.id);
-  res.json({ success: true });
-});
-
-// ---------------------------------------------------------------------------
-// Fallback — serve index.html for any non-API route (SPA support)
+// Fallback — SPA
 // ---------------------------------------------------------------------------
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -448,6 +905,6 @@ app.get("*", (_req, res) => {
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`ML Resource Catalogue running at http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`ML Asset Catalogue running on port ${PORT}`);
 });
